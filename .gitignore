@@ -1,0 +1,8 @@
+node_modules/
+medilink.db
+medilink.db-journal
+medilink.db-wal
+medilink.db-shm
+.DS_Store
+*.log
+.env

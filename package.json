@@ -1,0 +1,16 @@
+{
+  "name": "medilink",
+  "version": "1.0.0",
+  "description": "FHIR R4-compliant Clinical Record Viewer with Express, SQLite, and vanilla JS.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
