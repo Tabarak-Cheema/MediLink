@@ -337,6 +337,124 @@ app.get('/api/audit', (req, res) => {
   res.json(db.prepare('SELECT * FROM audit_log ORDER BY id DESC LIMIT 50').all());
 });
 
+// ---------- Staff: create / update patients and records ----------
+app.post('/api/patients', (req, res) => {
+  const { mrn, name, gender, dob, address, phone, email } = req.body || {};
+  if (!mrn || !name) return res.status(400).json({ error: 'mrn and name are required' });
+  try {
+    const info = db.prepare(
+      'INSERT INTO patients (mrn, name, gender, dob, address, phone, email) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(mrn, name, gender || '', dob || '', address || '', phone || '', email || '');
+    res.status(201).json({ id: Number(info.lastInsertRowid) });
+  } catch (e) {
+    const msg = /UNIQUE/.test(e.message) ? 'A patient with that MRN already exists' : e.message;
+    res.status(400).json({ error: msg });
+  }
+});
+
+app.put('/api/patients/:id', (req, res) => {
+  const { mrn, name, gender, dob, address, phone, email } = req.body || {};
+  if (!mrn || !name) return res.status(400).json({ error: 'mrn and name are required' });
+  try {
+    const info = db.prepare(
+      'UPDATE patients SET mrn=?, name=?, gender=?, dob=?, address=?, phone=?, email=? WHERE id=?'
+    ).run(mrn, name, gender || '', dob || '', address || '', phone || '', email || '', Number(req.params.id));
+    if (info.changes === 0) return res.status(404).json({ error: 'Patient not found' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/patients/:id/conditions', (req, res) => {
+  const { name, status, onset_date, icd10, severity } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const info = db.prepare(
+    'INSERT INTO conditions (patient_id, name, status, onset_date, icd10, severity) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(Number(req.params.id), name, status || 'active', onset_date || '', icd10 || '', severity || '');
+  res.status(201).json({ id: Number(info.lastInsertRowid) });
+});
+app.put('/api/conditions/:id', (req, res) => {
+  const { name, status, onset_date, icd10, severity } = req.body || {};
+  const info = db.prepare(
+    'UPDATE conditions SET name=?, status=?, onset_date=?, icd10=?, severity=? WHERE id=?'
+  ).run(name, status || '', onset_date || '', icd10 || '', severity || '', Number(req.params.id));
+  if (info.changes === 0) return res.status(404).json({ error: 'Condition not found' });
+  res.json({ ok: true });
+});
+app.delete('/api/conditions/:id', (req, res) => {
+  db.prepare('DELETE FROM conditions WHERE id=?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+app.post('/api/patients/:id/medications', (req, res) => {
+  const { name, dose, frequency, route, status, start_date, prescriber } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'name is required' });
+  const info = db.prepare(
+    'INSERT INTO medications (patient_id, name, dose, frequency, route, status, start_date, prescriber) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(Number(req.params.id), name, dose || '', frequency || '', route || '', status || 'active', start_date || '', prescriber || '');
+  res.status(201).json({ id: Number(info.lastInsertRowid) });
+});
+app.put('/api/medications/:id', (req, res) => {
+  const { name, dose, frequency, route, status, start_date, prescriber } = req.body || {};
+  const info = db.prepare(
+    'UPDATE medications SET name=?, dose=?, frequency=?, route=?, status=?, start_date=?, prescriber=? WHERE id=?'
+  ).run(name, dose || '', frequency || '', route || '', status || '', start_date || '', prescriber || '', Number(req.params.id));
+  if (info.changes === 0) return res.status(404).json({ error: 'Medication not found' });
+  res.json({ ok: true });
+});
+app.delete('/api/medications/:id', (req, res) => {
+  db.prepare('DELETE FROM medications WHERE id=?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+app.post('/api/patients/:id/allergies', (req, res) => {
+  const { substance, severity, reaction, status } = req.body || {};
+  if (!substance) return res.status(400).json({ error: 'substance is required' });
+  const info = db.prepare(
+    'INSERT INTO allergies (patient_id, substance, severity, reaction, status) VALUES (?, ?, ?, ?, ?)'
+  ).run(Number(req.params.id), substance, severity || '', reaction || '', status || 'active');
+  res.status(201).json({ id: Number(info.lastInsertRowid) });
+});
+app.put('/api/allergies/:id', (req, res) => {
+  const { substance, severity, reaction, status } = req.body || {};
+  const info = db.prepare(
+    'UPDATE allergies SET substance=?, severity=?, reaction=?, status=? WHERE id=?'
+  ).run(substance, severity || '', reaction || '', status || '', Number(req.params.id));
+  if (info.changes === 0) return res.status(404).json({ error: 'Allergy not found' });
+  res.json({ ok: true });
+});
+app.delete('/api/allergies/:id', (req, res) => {
+  db.prepare('DELETE FROM allergies WHERE id=?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+app.post('/api/patients/:id/observations', (req, res) => {
+  const { type, loinc_code, value, unit, effective_date, notes } = req.body || {};
+  if (!type || !value) return res.status(400).json({ error: 'type and value are required' });
+  const info = db.prepare(
+    'INSERT INTO observations (patient_id, type, loinc_code, value, unit, effective_date, notes) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(Number(req.params.id), type, loinc_code || '', value, unit || '', effective_date || new Date().toISOString().slice(0,10), notes || '');
+  res.status(201).json({ id: Number(info.lastInsertRowid) });
+});
+app.delete('/api/observations/:id', (req, res) => {
+  db.prepare('DELETE FROM observations WHERE id=?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+app.put('/api/encounters/:id', (req, res) => {
+  const { date, type, provider, reason, notes } = req.body || {};
+  const info = db.prepare(
+    'UPDATE encounters SET date=?, encounter_type=?, provider=?, reason=?, notes=? WHERE id=?'
+  ).run(date, type, provider || '', reason || '', notes || '', Number(req.params.id));
+  if (info.changes === 0) return res.status(404).json({ error: 'Encounter not found' });
+  res.json({ ok: true });
+});
+app.delete('/api/encounters/:id', (req, res) => {
+  db.prepare('DELETE FROM encounters WHERE id=?').run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
 // ---------- FHIR proxy ----------
 function fetchHapi(urlStr, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
