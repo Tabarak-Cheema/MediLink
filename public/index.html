@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>MediLink — Clinical Record Viewer</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  .skeleton { background: linear-gradient(90deg, #e2e8f0 25%, #f1f5f9 50%, #e2e8f0 75%); background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 6px; }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 9999px; font-size: 12px; font-weight: 500; }
+  .pill-active { background: #d1fae5; color: #065f46; }
+  .pill-high { background: #fee2e2; color: #991b1b; }
+  .pill-moderate { background: #fef3c7; color: #92400e; }
+  .pill-mild { background: #e0e7ff; color: #3730a3; }
+  .pill-severe { background: #fecaca; color: #7f1d1d; }
+  .pill-neutral { background: #e2e8f0; color: #1e293b; }
+  .timeline-dot { width: 10px; height: 10px; background: #0d9488; border-radius: 50%; margin-top: 6px; }
+  .tab-btn { padding: 8px 16px; border-bottom: 2px solid transparent; color: #64748b; font-weight: 500; cursor: pointer; }
+  .tab-btn.active { color: #0f172a; border-color: #0d9488; }
+  .toast { position: fixed; bottom: 24px; right: 24px; background: #0f172a; color: white; padding: 12px 18px; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); z-index: 50; display: flex; gap: 12px; align-items: center; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(15,23,42,0.5); display: flex; align-items: center; justify-content: center; z-index: 40; }
+</style>
+</head>
+<body class="bg-white text-slate-900">
+  <header class="border-b border-slate-200 px-8 py-5 flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-semibold text-slate-900">MediLink <span class="text-slate-400 font-normal">— Clinical Record Viewer</span></h1>
+      <p class="text-sm text-slate-500 mt-1">FHIR R4 EHR interface with full-stack persistence</p>
+    </div>
+    <div class="flex items-center gap-2 bg-slate-100 rounded-lg p-1">
+      <button id="modeLocal" class="px-4 py-1.5 rounded-md text-sm font-medium bg-white text-slate-900 shadow-sm">Local DB</button>
+      <button id="modeFhir" class="px-4 py-1.5 rounded-md text-sm font-medium text-slate-600">Live FHIR</button>
+    </div>
+  </header>
+
+  <div class="flex" style="min-height: calc(100vh - 140px);">
+    <aside class="w-80 border-r border-slate-200 p-4 overflow-y-auto">
+      <div id="sidebarLocal">
+        <h2 class="text-xs uppercase tracking-wider text-slate-500 font-semibold mb-3 px-2">Patients</h2>
+        <div id="patientList" class="space-y-1"></div>
+      </div>
+      <div id="sidebarFhir" class="hidden">
+        <h2 class="text-xs uppercase tracking-wider text-slate-500 font-semibold mb-3 px-2">HAPI FHIR Search</h2>
+        <input id="fhirSearch" type="text" placeholder="e.g. 597173 or 609787"
+               class="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-teal-600" />
+        <button id="fhirGo" class="mt-2 w-full bg-teal-600 text-white rounded-lg py-2 text-sm font-medium hover:bg-teal-700">Load Patient</button>
+        <p class="text-xs text-slate-500 mt-3 px-1">Fetches Patient/$everything from hapi.fhir.org/baseR4 via the backend proxy.</p>
+      </div>
+    </aside>
+
+    <main class="flex-1 p-8 overflow-y-auto">
+      <div id="emptyState" class="h-full flex items-center justify-center text-slate-400">
+        <div class="text-center">
+          <p class="text-lg">Select a patient to view the clinical record</p>
+          <p class="text-sm mt-2">Switch to Live FHIR to query the HAPI sandbox</p>
+        </div>
+      </div>
+      <div id="loadingState" class="hidden space-y-4">
+        <div class="skeleton h-28"></div>
+        <div class="grid grid-cols-4 gap-4">
+          <div class="skeleton h-24"></div><div class="skeleton h-24"></div><div class="skeleton h-24"></div><div class="skeleton h-24"></div>
+        </div>
+        <div class="skeleton h-80"></div>
+      </div>
+      <div id="patientView" class="hidden space-y-6"></div>
+    </main>
+  </div>
+
+  <footer class="border-t border-slate-200 px-8 py-4 text-xs text-slate-500">
+    Built with FHIR R4 · Express · SQLite · HAPI Sandbox integration · Demonstrates EHR, RCM, and chronic care management patterns.
+  </footer>
+
+  <div id="toast" class="hidden"></div>
+  <div id="modalRoot"></div>
+
+<script>
+let mode = 'local';
+let currentPatient = null;
+let vitalsChart = null;
+let activeTab = 'conditions';
+
+const $ = (id) => document.getElementById(id);
+
+function showToast(msg, withFallback) {
+  const t = $('toast');
+  t.className = 'toast';
+  t.innerHTML = '<span>' + msg + '</span>' +
+    (withFallback ? '<button id="toastFallback" class="bg-teal-600 px-3 py-1 rounded text-sm">Switch to Local DB</button>' : '') +
+    '<button id="toastClose" class="text-slate-300 hover:text-white">×</button>';
+  t.classList.remove('hidden');
+  if (withFallback) $('toastFallback').onclick = () => { setMode('local'); loadPatients(); t.classList.add('hidden'); };
+  $('toastClose').onclick = () => t.classList.add('hidden');
+  setTimeout(() => t.classList.add('hidden'), 8000);
+}
+
+function setMode(m) {
+  mode = m;
+  $('modeLocal').className = 'px-4 py-1.5 rounded-md text-sm font-medium ' + (m==='local' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600');
+  $('modeFhir').className = 'px-4 py-1.5 rounded-md text-sm font-medium ' + (m==='fhir' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600');
+  $('sidebarLocal').classList.toggle('hidden', m !== 'local');
+  $('sidebarFhir').classList.toggle('hidden', m !== 'fhir');
+  $('emptyState').classList.remove('hidden');
+  $('patientView').classList.add('hidden');
+}
+
+$('modeLocal').onclick = () => { setMode('local'); loadPatients(); };
+$('modeFhir').onclick = () => { setMode('fhir'); };
+$('fhirGo').onclick = () => {
+  const v = $('fhirSearch').value.trim();
+  if (v) loadFhirPatient(v);
+};
+$('fhirSearch').onkeydown = (e) => { if (e.key === 'Enter') $('fhirGo').click(); };
+
+async function loadPatients() {
+  try {
+    const res = await fetch('/api/patients');
+    if (!res.ok) throw new Error('Failed');
+    const patients = await res.json();
+    const container = $('patientList');
+    container.innerHTML = '';
+    patients.forEach(p => {
+      const el = document.createElement('div');
+      el.className = 'p-3 rounded-lg hover:bg-slate-50 cursor-pointer border border-transparent';
+      el.innerHTML = `
+        <div class="flex justify-between items-start">
+          <div>
+            <p class="font-medium text-slate-900">${p.name}</p>
+            <p class="text-xs text-slate-500 mt-0.5">${p.age} yrs · ${p.gender} · ${p.mrn}</p>
+          </div>
+          <span class="pill pill-neutral">${p.active_conditions}</span>
+        </div>`;
+      el.onclick = () => {
+        document.querySelectorAll('#patientList > div').forEach(x => x.classList.remove('bg-teal-50','border-teal-200'));
+        el.classList.add('bg-teal-50','border-teal-200');
+        loadPatient(p.id);
+      };
+      container.appendChild(el);
+    });
+  } catch (e) {
+    showToast('Could not load patient list.', false);
+  }
+}
+
+async function loadPatient(id) {
+  $('emptyState').classList.add('hidden');
+  $('patientView').classList.add('hidden');
+  $('loadingState').classList.remove('hidden');
+  try {
+    const res = await fetch('/api/patients/' + id);
+    if (!res.ok) throw new Error('Failed');
+    currentPatient = await res.json();
+    currentPatient._source = 'local';
+    renderPatient();
+  } catch (e) {
+    $('loadingState').classList.add('hidden');
+    showToast('Failed to load patient.', false);
+  }
+}
+
+async function loadFhirPatient(fid) {
+  $('emptyState').classList.add('hidden');
+  $('patientView').classList.add('hidden');
+  $('loadingState').classList.remove('hidden');
+  try {
+    const res = await fetch('/api/fhir/' + encodeURIComponent(fid));
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'FHIR upstream failed');
+    }
+    currentPatient = await res.json();
+    currentPatient._source = 'fhir';
+    renderPatient();
+  } catch (e) {
+    $('loadingState').classList.add('hidden');
+    showToast('Live FHIR fetch failed: ' + e.message, true);
+  }
+}
+
+function pillFor(status) {
+  if (!status) return 'pill pill-neutral';
+  const s = status.toLowerCase();
+  if (s === 'active') return 'pill pill-active';
+  if (s === 'high' || s === 'severe') return 'pill pill-severe';
+  if (s === 'moderate') return 'pill pill-moderate';
+  if (s === 'mild') return 'pill pill-mild';
+  return 'pill pill-neutral';
+}
+
+function encountersLast12Months(encs) {
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - 12);
+  return encs.filter(e => new Date(e.date) >= cutoff).length;
+}
+
+function renderPatient() {
+  const { patient, conditions, medications, allergies, observations, encounters } = currentPatient;
+  $('loadingState').classList.add('hidden');
+  $('patientView').classList.remove('hidden');
+
+  const view = $('patientView');
+  view.innerHTML = `
+    <!-- Patient header -->
+    <div class="border border-slate-200 rounded-lg shadow-sm p-6 bg-white">
+      <div class="flex justify-between items-start">
+        <div>
+          <h2 class="text-2xl font-semibold text-slate-900">${patient.name}</h2>
+          <p class="text-sm text-slate-500 mt-1">DOB ${patient.dob || '—'} · ${patient.age || '—'} yrs · ${patient.gender || '—'} · MRN ${patient.mrn}</p>
+          <p class="text-sm text-slate-600 mt-2">${patient.address || ''}</p>
+          <p class="text-sm text-slate-600">${patient.phone || ''} ${patient.email ? ' · ' + patient.email : ''}</p>
+        </div>
+        <span class="pill pill-neutral">${currentPatient._source === 'fhir' ? 'Live FHIR' : 'Local DB'}</span>
+      </div>
+    </div>
+
+    <!-- Stat tiles -->
+    <div class="grid grid-cols-4 gap-4">
+      ${tile('Active Conditions', conditions.filter(c => (c.status||'').toLowerCase()==='active').length)}
+      ${tile('Active Medications', medications.filter(m => (m.status||'').toLowerCase()==='active').length)}
+      ${tile('Allergies', allergies.length)}
+      ${tile('Encounters (12 mo)', encountersLast12Months(encounters))}
+    </div>
+
+    <!-- Vitals chart -->
+    <div class="border border-slate-200 rounded-lg shadow-sm p-6 bg-white">
+      <h3 class="text-sm font-semibold text-slate-900 mb-4">Vitals — Last 10 Readings</h3>
+      <div style="height: 320px;"><canvas id="vitalsCanvas"></canvas></div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="border border-slate-200 rounded-lg shadow-sm bg-white">
+      <div class="flex border-b border-slate-200 px-4 items-center justify-between">
+        <div class="flex">
+          <div class="tab-btn" data-tab="conditions">Conditions</div>
+          <div class="tab-btn" data-tab="medications">Medications</div>
+          <div class="tab-btn" data-tab="allergies">Allergies</div>
+          <div class="tab-btn" data-tab="observations">Observations</div>
+          <div class="tab-btn" data-tab="encounters">Encounters</div>
+          <div class="tab-btn" data-tab="audit">Audit Log</div>
+        </div>
+        <button id="newEncBtn" class="hidden text-sm bg-teal-600 text-white px-4 py-1.5 rounded-lg hover:bg-teal-700">+ New Encounter</button>
+      </div>
+      <div id="tabContent" class="p-6"></div>
+    </div>
+
+    <!-- Encounter timeline -->
+    <div class="border border-slate-200 rounded-lg shadow-sm p-6 bg-white">
+      <h3 class="text-sm font-semibold text-slate-900 mb-5">Encounter Timeline — Last 6</h3>
+      <div class="space-y-4">
+        ${encounters.slice(0, 6).map(e => `
+          <div class="flex gap-4">
+            <div class="flex flex-col items-center">
+              <div class="timeline-dot"></div>
+              <div class="w-px flex-1 bg-slate-200 mt-1"></div>
+            </div>
+            <div class="pb-4">
+              <p class="text-sm font-medium text-slate-900">${e.date} · ${e.encounter_type}</p>
+              <p class="text-sm text-slate-600 mt-0.5">${e.provider || '—'}</p>
+              <p class="text-sm text-slate-500 mt-0.5">${e.reason || ''}</p>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+
+  renderVitals();
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.onclick = () => { activeTab = btn.dataset.tab; renderTab(); };
+  });
+  $('newEncBtn').onclick = openEncounterModal;
+  activeTab = 'conditions';
+  renderTab();
+}
+
+function tile(label, value) {
+  return `<div class="border border-slate-200 rounded-lg p-5 bg-white shadow-sm">
+    <p class="text-xs uppercase tracking-wider text-slate-500 font-semibold">${label}</p>
+    <p class="text-3xl font-semibold text-slate-900 mt-2">${value}</p>
+  </div>`;
+}
+
+function renderVitals() {
+  const obs = currentPatient.observations || [];
+  const bp = obs.filter(o => o.type === 'blood-pressure').slice(-10);
+  const hr = obs.filter(o => o.type === 'heart-rate').slice(-10);
+  const labels = bp.map(o => (o.effective_date || '').slice(0,10));
+  const sys = bp.map(o => { const p = String(o.value).split('/'); return parseInt(p[0]); });
+  const dia = bp.map(o => { const p = String(o.value).split('/'); return parseInt(p[1]); });
+  const hrVals = hr.map(o => parseFloat(o.value));
+
+  if (vitalsChart) vitalsChart.destroy();
+  const ctx = $('vitalsCanvas').getContext('2d');
+  vitalsChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Systolic (mmHg)', data: sys, borderColor: '#0d9488', backgroundColor: '#0d948833', yAxisID: 'y', tension: 0.3 },
+        { label: 'Diastolic (mmHg)', data: dia, borderColor: '#64748b', backgroundColor: '#64748b33', yAxisID: 'y', tension: 0.3 },
+        { label: 'Heart Rate (bpm)', data: hrVals, borderColor: '#b91c1c', backgroundColor: '#b91c1c33', yAxisID: 'y1', tension: 0.3, borderDash: [5,4] }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        y: { type: 'linear', position: 'left', title: { display: true, text: 'Blood Pressure (mmHg)' } },
+        y1: { type: 'linear', position: 'right', title: { display: true, text: 'Heart Rate (bpm)' }, grid: { drawOnChartArea: false } }
+      },
+      plugins: { legend: { position: 'bottom' } }
+    }
+  });
+}
+
+function renderTab() {
+  $('newEncBtn').classList.toggle('hidden', activeTab !== 'encounters');
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === activeTab));
+  const c = $('tabContent');
+  const { conditions, medications, allergies, observations, encounters } = currentPatient;
+
+  if (activeTab === 'conditions') {
+    c.innerHTML = tableOf(['Condition','Status','Onset','ICD-10','Severity'],
+      conditions.map(x => [x.name, pill(x.status), x.onset_date || '—', x.icd10 || '—', pill(x.severity)]));
+  } else if (activeTab === 'medications') {
+    c.innerHTML = tableOf(['Medication','Dose','Frequency','Route','Status','Start','Prescriber'],
+      medications.map(x => [x.name, x.dose || '—', x.frequency || '—', x.route || '—', pill(x.status), x.start_date || '—', x.prescriber || '—']));
+  } else if (activeTab === 'allergies') {
+    c.innerHTML = tableOf(['Substance','Severity','Reaction','Status'],
+      allergies.map(x => [x.substance, pill(x.severity), x.reaction || '—', pill(x.status)]));
+  } else if (activeTab === 'observations') {
+    c.innerHTML = tableOf(['Type','Value','Unit','Date','LOINC','Notes'],
+      observations.slice(-50).reverse().map(x => [x.type, x.value, x.unit || '—', (x.effective_date||'').slice(0,10), x.loinc_code || '—', x.notes || '']));
+  } else if (activeTab === 'encounters') {
+    c.innerHTML = tableOf(['Date','Type','Provider','Reason','Notes'],
+      encounters.map(x => [x.date, x.encounter_type, x.provider || '—', x.reason || '—', x.notes || '']));
+  } else if (activeTab === 'audit') {
+    fetch('/api/audit').then(r => r.json()).then(rows => {
+      c.innerHTML = tableOf(['Timestamp','Method','Path','Status','Duration (ms)'],
+        rows.map(r => [r.timestamp, r.method, r.path, String(r.status), String(r.duration_ms)]));
+    }).catch(() => { c.innerHTML = '<p class="text-sm text-slate-500">Audit log unavailable.</p>'; });
+  }
+}
+
+function pill(val) {
+  if (!val) return '<span class="pill pill-neutral">—</span>';
+  return `<span class="${pillFor(val)}">${val}</span>`;
+}
+function tableOf(headers, rows) {
+  if (!rows.length) return '<p class="text-sm text-slate-500">No records.</p>';
+  return `<div class="overflow-x-auto"><table class="w-full text-sm">
+    <thead><tr class="text-left text-xs uppercase tracking-wider text-slate-500 border-b border-slate-200">
+      ${headers.map(h => `<th class="pb-3 pr-4 font-semibold">${h}</th>`).join('')}
+    </tr></thead>
+    <tbody>${rows.map(r => `<tr class="border-b border-slate-100">${r.map(cell => `<td class="py-3 pr-4 text-slate-800">${cell}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function openEncounterModal() {
+  const today = new Date().toISOString().slice(0,10);
+  $('modalRoot').innerHTML = `
+    <div class="modal-backdrop">
+      <div class="bg-white rounded-lg shadow-sm w-full max-w-md p-6 border border-slate-200">
+        <h3 class="text-lg font-semibold text-slate-900 mb-4">New Encounter</h3>
+        <div class="space-y-3">
+          <label class="block"><span class="text-xs font-medium text-slate-600">Date</span>
+            <input id="encDate" type="date" value="${today}" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-teal-600" /></label>
+          <label class="block"><span class="text-xs font-medium text-slate-600">Type</span>
+            <select id="encType" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-teal-600">
+              <option>Office Visit</option><option>Specialist Consult</option><option>Emergency</option><option>Hospitalization</option><option>Telehealth</option>
+            </select></label>
+          <label class="block"><span class="text-xs font-medium text-slate-600">Provider</span>
+            <input id="encProvider" type="text" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-teal-600" /></label>
+          <label class="block"><span class="text-xs font-medium text-slate-600">Reason</span>
+            <input id="encReason" type="text" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-teal-600" /></label>
+          <label class="block"><span class="text-xs font-medium text-slate-600">Notes</span>
+            <textarea id="encNotes" rows="3" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-teal-600"></textarea></label>
+        </div>
+        <div class="flex justify-end gap-2 mt-5">
+          <button id="encCancel" class="px-4 py-2 text-sm text-slate-600 hover:text-slate-900">Cancel</button>
+          <button id="encSave" class="px-4 py-2 text-sm bg-teal-600 text-white rounded-lg hover:bg-teal-700">Save</button>
+        </div>
+      </div>
+    </div>`;
+  $('encCancel').onclick = () => { $('modalRoot').innerHTML = ''; };
+  $('encSave').onclick = async () => {
+    const payload = {
+      date: $('encDate').value,
+      type: $('encType').value,
+      provider: $('encProvider').value,
+      reason: $('encReason').value,
+      notes: $('encNotes').value
+    };
+    try {
+      const res = await fetch('/api/patients/' + currentPatient.patient.id + '/encounters', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error('Failed to save');
+      $('modalRoot').innerHTML = '';
+      await loadPatient(currentPatient.patient.id);
+      showToast('Encounter saved.', false);
+    } catch (e) {
+      showToast('Failed to save encounter.', false);
+    }
+  };
+}
+
+loadPatients();
+</script>
+</body>
+</html>
