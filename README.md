@@ -15,7 +15,7 @@ A FHIR R4-compliant Electronic Health Record (EHR) viewer built as a full-stack 
 
 ## Tech Stack
 
-- **Backend:** Node.js, Express, better-sqlite3
+- **Backend:** Node.js, Express, node:sqlite (built-in)
 - **Frontend:** Vanilla JavaScript, Tailwind CSS (CDN), Chart.js (CDN)
 - **Interoperability:** HAPI FHIR R4 sandbox proxy (`Patient/{id}/$everything`)
 - **Persistence:** SQLite file database (`medilink.db`), auto-created and auto-seeded on first run
@@ -26,6 +26,8 @@ A FHIR R4-compliant Electronic Health Record (EHR) viewer built as a full-stack 
 npm install
 node server.js
 ```
+
+> Requires Node.js 22.5 or newer (the backend uses the built-in `node:sqlite` module).
 
 Then open [http://localhost:3000](http://localhost:3000).
 
