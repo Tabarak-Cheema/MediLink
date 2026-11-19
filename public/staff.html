@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MediLink Staff — Patient Management</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  .tab-btn { padding: 8px 16px; border-bottom: 2px solid transparent; color: #64748b; font-weight: 500; cursor: pointer; font-size: 14px; }
+  .tab-btn.active { color: #0f172a; border-color: #0d9488; }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 9999px; font-size: 12px; font-weight: 500; }
+  .pill-active { background: #d1fae5; color: #065f46; }
+  .pill-high, .pill-severe { background: #fee2e2; color: #991b1b; }
+  .pill-moderate { background: #fef3c7; color: #92400e; }
+  .pill-mild { background: #e0e7ff; color: #3730a3; }
+  .pill-neutral { background: #e2e8f0; color: #1e293b; }
+  .input { width: 100%; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 12px; font-size: 14px; }
+  .input:focus { outline: none; border-color: #0d9488; }
+  .label { display: block; font-size: 12px; font-weight: 500; color: #475569; margin-bottom: 4px; }
+  .btn-primary { background: #0d9488; color: white; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 500; }
+  .btn-primary:hover { background: #0f766e; }
+  .btn-secondary { background: white; color: #475569; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 500; border: 1px solid #e2e8f0; }
+  .btn-secondary:hover { background: #f8fafc; }
+  .btn-danger { color: #b91c1c; font-size: 13px; font-weight: 500; }
+  .btn-danger:hover { color: #7f1d1d; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(15,23,42,0.5); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 24px; }
+  .toast { position: fixed; bottom: 24px; right: 24px; background: #0f172a; color: white; padding: 12px 18px; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); z-index: 60; }
+</style>
+</head>
+<body class="bg-white text-slate-900">
+  <header class="border-b border-slate-200 px-8 py-5 flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-semibold text-slate-900">MediLink Staff <span class="text-slate-400 font-normal">— Patient Management</span></h1>
+      <p class="text-sm text-slate-500 mt-1">Clinician interface for patient registration and record maintenance</p>
+    </div>
+    <div class="flex items-center gap-3">
+      <a href="/" class="text-sm text-slate-600 hover:text-slate-900">← Back to Viewer</a>
+      <button id="newPatientBtn" class="btn-primary">+ New Patient</button>
+    </div>
+  </header>
+
+  <div class="flex" style="min-height: calc(100vh - 140px);">
+    <aside class="w-80 border-r border-slate-200 p-4 overflow-y-auto">
+      <h2 class="text-xs uppercase tracking-wider text-slate-500 font-semibold mb-3 px-2">Patients</h2>
+      <input id="search" type="text" placeholder="Search by name or MRN" class="input mb-3" />
+      <div id="patientList" class="space-y-1"></div>
+    </aside>
+
+    <main class="flex-1 p-8 overflow-y-auto">
+      <div id="emptyState" class="h-full flex items-center justify-center text-slate-400">
+        <div class="text-center">
+          <p class="text-lg">Select a patient to edit, or create a new one</p>
+        </div>
+      </div>
+      <div id="editor" class="hidden space-y-6"></div>
+    </main>
+  </div>
+
+  <footer class="border-t border-slate-200 px-8 py-4 text-xs text-slate-500">
+    Built with FHIR R4 · Express · SQLite · HAPI Sandbox integration · Demonstrates EHR, RCM, and chronic care management patterns.
+  </footer>
+
+  <div id="modalRoot"></div>
+  <div id="toast" class="toast hidden"></div>
+
+<script>
+let currentId = null;
+let currentData = null;
+let activeTab = 'demographics';
+let allPatients = [];
+const $ = (id) => document.getElementById(id);
+
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.classList.remove('hidden');
+  setTimeout(() => t.classList.add('hidden'), 2500);
+}
+function pillClass(v) {
+  const s = (v||'').toLowerCase();
+  if (s === 'active') return 'pill pill-active';
+  if (s === 'high' || s === 'severe') return 'pill pill-high';
+  if (s === 'moderate') return 'pill pill-moderate';
+  if (s === 'mild') return 'pill pill-mild';
+  return 'pill pill-neutral';
+}
+function age(dob) {
+  if (!dob) return '—';
+  return Math.floor((Date.now() - new Date(dob).getTime()) / (365.25*24*3600*1000));
+}
+
+async function loadPatients() {
+  const res = await fetch('/api/patients');
+  allPatients = await res.json();
+  renderPatientList();
+}
+
+function renderPatientList() {
+  const q = $('search').value.trim().toLowerCase();
+  const filtered = allPatients.filter(p => !q || p.name.toLowerCase().includes(q) || p.mrn.toLowerCase().includes(q));
+  const c = $('patientList'); c.innerHTML = '';
+  filtered.forEach(p => {
+    const el = document.createElement('div');
+    el.className = 'p-3 rounded-lg hover:bg-slate-50 cursor-pointer border border-transparent' + (p.id === currentId ? ' bg-teal-50 border-teal-200' : '');
+    el.innerHTML = `
+      <p class="font-medium text-slate-900 text-sm">${p.name}</p>
+      <p class="text-xs text-slate-500 mt-0.5">${age(p.dob)} yrs · ${p.gender || '—'} · ${p.mrn}</p>`;
+    el.onclick = () => selectPatient(p.id);
+    c.appendChild(el);
+  });
+  if (!filtered.length) c.innerHTML = '<p class="text-sm text-slate-400 px-2">No matches.</p>';
+}
+$('search').oninput = renderPatientList;
+
+async function selectPatient(id) {
+  currentId = id;
+  const res = await fetch('/api/patients/' + id);
+  if (!res.ok) { toast('Failed to load patient'); return; }
+  currentData = await res.json();
+  renderPatientList();
+  activeTab = 'demographics';
+  renderEditor();
+}
+
+function renderEditor() {
+  $('emptyState').classList.add('hidden');
+  $('editor').classList.remove('hidden');
+  const { patient } = currentData;
+  $('editor').innerHTML = `
+    <div class="border border-slate-200 rounded-lg shadow-sm p-6">
+      <div class="flex justify-between items-start">
+        <div>
+          <h2 class="text-xl font-semibold">${patient.name}</h2>
+          <p class="text-sm text-slate-500 mt-1">MRN ${patient.mrn} · ${age(patient.dob)} yrs · ${patient.gender || '—'}</p>
+        </div>
+        <span class="pill pill-neutral">ID ${patient.id}</span>
+      </div>
+    </div>
+
+    <div class="border border-slate-200 rounded-lg shadow-sm">
+      <div class="flex border-b border-slate-200 px-4">
+        ${['demographics','conditions','medications','allergies','observations','encounters'].map(t =>
+          `<div class="tab-btn ${activeTab===t?'active':''}" data-tab="${t}">${t[0].toUpperCase()+t.slice(1)}</div>`
+        ).join('')}
+      </div>
+      <div id="tabBody" class="p-6"></div>
+    </div>
+  `;
+  document.querySelectorAll('.tab-btn').forEach(b => b.onclick = () => { activeTab = b.dataset.tab; renderEditor(); });
+  renderTab();
+}
+
+function renderTab() {
+  const body = $('tabBody');
+  const { patient, conditions, medications, allergies, observations, encounters } = currentData;
+
+  if (activeTab === 'demographics') {
+    body.innerHTML = demographicsForm(patient);
+    $('demoSave').onclick = saveDemographics;
+    return;
+  }
+  const lists = { conditions, medications, allergies, observations, encounters };
+  const items = lists[activeTab];
+  body.innerHTML = `
+    <div class="flex justify-between items-center mb-4">
+      <h3 class="text-sm font-semibold">${activeTab[0].toUpperCase()+activeTab.slice(1)} (${items.length})</h3>
+      <button id="addBtn" class="btn-primary">+ Add</button>
+    </div>
+    <div id="rows" class="space-y-2">${items.map(x => rowFor(activeTab, x)).join('')}</div>
+  `;
+  $('addBtn').onclick = () => openRowForm(activeTab, null);
+  document.querySelectorAll('[data-edit-id]').forEach(b => {
+    b.onclick = () => openRowForm(activeTab, items.find(x => x.id === Number(b.dataset.editId)));
+  });
+  document.querySelectorAll('[data-del-id]').forEach(b => {
+    b.onclick = () => deleteRow(activeTab, Number(b.dataset.delId));
+  });
+}
+
+function rowFor(tab, x) {
+  let line1 = '', line2 = '';
+  if (tab === 'conditions') { line1 = `${x.name} <span class="${pillClass(x.status)}">${x.status||'—'}</span>`; line2 = `${x.icd10||'—'} · Onset ${x.onset_date||'—'} · <span class="${pillClass(x.severity)}">${x.severity||'—'}</span>`; }
+  else if (tab === 'medications') { line1 = `${x.name} <span class="${pillClass(x.status)}">${x.status||'—'}</span>`; line2 = `${x.dose||'—'} · ${x.frequency||'—'} · ${x.route||'—'} · ${x.prescriber||'—'}`; }
+  else if (tab === 'allergies') { line1 = `${x.substance} <span class="${pillClass(x.severity)}">${x.severity||'—'}</span>`; line2 = `${x.reaction||'—'} · ${x.status||'—'}`; }
+  else if (tab === 'observations') { line1 = `${x.type}: <span class="font-semibold">${x.value} ${x.unit||''}</span>`; line2 = `${x.effective_date||'—'} · LOINC ${x.loinc_code||'—'}`; }
+  else if (tab === 'encounters') { line1 = `${x.date} — ${x.encounter_type}`; line2 = `${x.provider||'—'} · ${x.reason||'—'}`; }
+  return `<div class="border border-slate-200 rounded-lg p-4 flex justify-between items-start">
+    <div><p class="text-sm font-medium text-slate-900">${line1}</p><p class="text-xs text-slate-500 mt-1">${line2}</p></div>
+    <div class="flex gap-3 items-center">
+      ${tab !== 'observations' ? `<button class="text-sm text-teal-700 hover:text-teal-900 font-medium" data-edit-id="${x.id}">Edit</button>` : ''}
+      <button class="btn-danger" data-del-id="${x.id}">Delete</button>
+    </div>
+  </div>`;
+}
+
+function demographicsForm(p) {
+  return `
+    <h3 class="text-sm font-semibold mb-5">Demographics</h3>
+    <div class="grid grid-cols-2 gap-4 max-w-3xl">
+      <div><label class="label">MRN</label><input id="dMrn" class="input" value="${p.mrn||''}" /></div>
+      <div><label class="label">Full Name</label><input id="dName" class="input" value="${p.name||''}" /></div>
+      <div><label class="label">Date of Birth</label><input id="dDob" type="date" class="input" value="${p.dob||''}" /></div>
+      <div><label class="label">Gender</label>
+        <select id="dGender" class="input">
+          ${['female','male','other','unknown'].map(g => `<option ${g===p.gender?'selected':''}>${g}</option>`).join('')}
+        </select>
+      </div>
+      <div class="col-span-2"><label class="label">Address</label><input id="dAddress" class="input" value="${p.address||''}" /></div>
+      <div><label class="label">Phone</label><input id="dPhone" class="input" value="${p.phone||''}" /></div>
+      <div><label class="label">Email</label><input id="dEmail" class="input" value="${p.email||''}" /></div>
+    </div>
+    <div class="mt-6"><button id="demoSave" class="btn-primary">Save Changes</button></div>`;
+}
+
+async function saveDemographics() {
+  const body = {
+    mrn: $('dMrn').value.trim(), name: $('dName').value.trim(),
+    dob: $('dDob').value, gender: $('dGender').value,
+    address: $('dAddress').value.trim(), phone: $('dPhone').value.trim(), email: $('dEmail').value.trim()
+  };
+  const res = await fetch('/api/patients/' + currentId, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  if (!res.ok) { const e = await res.json().catch(()=>({})); toast(e.error || 'Save failed'); return; }
+  toast('Saved.'); await loadPatients(); await selectPatient(currentId);
+}
+
+function openRowForm(tab, existing) {
+  const isEdit = !!existing;
+  const x = existing || {};
+  let fields = '';
+  if (tab === 'conditions') fields = `
+    <div><label class="label">Condition Name</label><input id="f_name" class="input" value="${x.name||''}" /></div>
+    <div class="grid grid-cols-2 gap-3">
+      <div><label class="label">Status</label><select id="f_status" class="input">${['active','resolved','inactive'].map(s=>`<option ${s===x.status?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div><label class="label">Severity</label><select id="f_severity" class="input">${['','mild','moderate','severe','high'].map(s=>`<option ${s===x.severity?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div><label class="label">Onset Date</label><input id="f_onset_date" type="date" class="input" value="${x.onset_date||''}" /></div>
+      <div><label class="label">ICD-10</label><input id="f_icd10" class="input" value="${x.icd10||''}" /></div>
+    </div>`;
+  else if (tab === 'medications') fields = `
+    <div><label class="label">Medication Name</label><input id="f_name" class="input" value="${x.name||''}" /></div>
+    <div class="grid grid-cols-2 gap-3">
+      <div><label class="label">Dose</label><input id="f_dose" class="input" value="${x.dose||''}" /></div>
+      <div><label class="label">Frequency</label><input id="f_frequency" class="input" value="${x.frequency||''}" placeholder="BID, daily, PRN..." /></div>
+      <div><label class="label">Route</label><input id="f_route" class="input" value="${x.route||''}" placeholder="oral, IV..." /></div>
+      <div><label class="label">Status</label><select id="f_status" class="input">${['active','discontinued','completed'].map(s=>`<option ${s===x.status?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div><label class="label">Start Date</label><input id="f_start_date" type="date" class="input" value="${x.start_date||''}" /></div>
+      <div><label class="label">Prescriber</label><input id="f_prescriber" class="input" value="${x.prescriber||''}" /></div>
+    </div>`;
+  else if (tab === 'allergies') fields = `
+    <div><label class="label">Substance</label><input id="f_substance" class="input" value="${x.substance||''}" /></div>
+    <div class="grid grid-cols-2 gap-3">
+      <div><label class="label">Severity</label><select id="f_severity" class="input">${['mild','moderate','high','severe'].map(s=>`<option ${s===x.severity?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div><label class="label">Status</label><select id="f_status" class="input">${['active','resolved'].map(s=>`<option ${s===x.status?'selected':''}>${s}</option>`).join('')}</select></div>
+    </div>
+    <div><label class="label">Reaction</label><input id="f_reaction" class="input" value="${x.reaction||''}" /></div>`;
+  else if (tab === 'observations') fields = `
+    <div class="grid grid-cols-2 gap-3">
+      <div><label class="label">Type</label><select id="f_type" class="input">
+        ${['blood-pressure','heart-rate','hba1c','fasting-glucose','weight','peak-flow','bnp','other'].map(t=>`<option ${t===x.type?'selected':''}>${t}</option>`).join('')}
+      </select></div>
+      <div><label class="label">Effective Date</label><input id="f_effective_date" type="date" class="input" value="${x.effective_date||new Date().toISOString().slice(0,10)}" /></div>
+      <div><label class="label">Value</label><input id="f_value" class="input" value="${x.value||''}" placeholder="e.g. 140/90 or 72" /></div>
+      <div><label class="label">Unit</label><input id="f_unit" class="input" value="${x.unit||''}" placeholder="mmHg, bpm, %..." /></div>
+      <div><label class="label">LOINC Code</label><input id="f_loinc_code" class="input" value="${x.loinc_code||''}" /></div>
+      <div><label class="label">Notes</label><input id="f_notes" class="input" value="${x.notes||''}" /></div>
+    </div>`;
+  else if (tab === 'encounters') fields = `
+    <div class="grid grid-cols-2 gap-3">
+      <div><label class="label">Date</label><input id="f_date" type="date" class="input" value="${x.date||new Date().toISOString().slice(0,10)}" /></div>
+      <div><label class="label">Type</label><select id="f_type" class="input">${['Office Visit','Specialist Consult','Emergency','Hospitalization','Telehealth'].map(s=>`<option ${s===x.encounter_type?'selected':''}>${s}</option>`).join('')}</select></div>
+      <div><label class="label">Provider</label><input id="f_provider" class="input" value="${x.provider||''}" /></div>
+      <div><label class="label">Reason</label><input id="f_reason" class="input" value="${x.reason||''}" /></div>
+    </div>
+    <div><label class="label">Notes</label><textarea id="f_notes" class="input" rows="2">${x.notes||''}</textarea></div>`;
+
+  $('modalRoot').innerHTML = `
+    <div class="modal-backdrop">
+      <div class="bg-white rounded-lg shadow-sm w-full max-w-lg p-6 border border-slate-200">
+        <h3 class="text-lg font-semibold mb-4">${isEdit?'Edit':'Add'} ${tab.slice(0,-1)}</h3>
+        <div class="space-y-3">${fields}</div>
+        <div class="flex justify-end gap-2 mt-5">
+          <button id="formCancel" class="btn-secondary">Cancel</button>
+          <button id="formSave" class="btn-primary">Save</button>
+        </div>
+      </div>
+    </div>`;
+  $('formCancel').onclick = () => $('modalRoot').innerHTML = '';
+  $('formSave').onclick = () => submitRowForm(tab, existing);
+}
+
+async function submitRowForm(tab, existing) {
+  const ids = {
+    conditions: ['name','status','onset_date','icd10','severity'],
+    medications: ['name','dose','frequency','route','status','start_date','prescriber'],
+    allergies: ['substance','severity','reaction','status'],
+    observations: ['type','value','unit','effective_date','loinc_code','notes'],
+    encounters: ['date','type','provider','reason','notes']
+  }[tab];
+  const body = {};
+  ids.forEach(k => { const el = $('f_' + k); if (el) body[k] = el.value; });
+  const singular = { conditions:'conditions', medications:'medications', allergies:'allergies', observations:'observations', encounters:'encounters' }[tab];
+  const url = existing ? `/api/${singular}/${existing.id}` : `/api/patients/${currentId}/${singular}`;
+  const method = existing ? 'PUT' : 'POST';
+  const res = await fetch(url, { method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  if (!res.ok) { const e = await res.json().catch(()=>({})); toast(e.error || 'Save failed'); return; }
+  $('modalRoot').innerHTML = '';
+  toast('Saved.');
+  await selectPatient(currentId);
+}
+
+async function deleteRow(tab, id) {
+  if (!confirm('Delete this ' + tab.slice(0,-1) + '?')) return;
+  const res = await fetch(`/api/${tab}/${id}`, { method: 'DELETE' });
+  if (!res.ok) { toast('Delete failed'); return; }
+  toast('Deleted.');
+  await selectPatient(currentId);
+}
+
+$('newPatientBtn').onclick = () => {
+  $('modalRoot').innerHTML = `
+    <div class="modal-backdrop">
+      <div class="bg-white rounded-lg shadow-sm w-full max-w-lg p-6 border border-slate-200">
+        <h3 class="text-lg font-semibold mb-4">New Patient</h3>
+        <div class="space-y-3">
+          <div class="grid grid-cols-2 gap-3">
+            <div><label class="label">MRN *</label><input id="np_mrn" class="input" placeholder="MLK-10000" /></div>
+            <div><label class="label">Full Name *</label><input id="np_name" class="input" /></div>
+            <div><label class="label">Date of Birth</label><input id="np_dob" type="date" class="input" /></div>
+            <div><label class="label">Gender</label><select id="np_gender" class="input"><option>female</option><option>male</option><option>other</option><option>unknown</option></select></div>
+          </div>
+          <div><label class="label">Address</label><input id="np_address" class="input" /></div>
+          <div class="grid grid-cols-2 gap-3">
+            <div><label class="label">Phone</label><input id="np_phone" class="input" /></div>
+            <div><label class="label">Email</label><input id="np_email" class="input" /></div>
+          </div>
+        </div>
+        <div class="flex justify-end gap-2 mt-5">
+          <button id="npCancel" class="btn-secondary">Cancel</button>
+          <button id="npSave" class="btn-primary">Create Patient</button>
+        </div>
+      </div>
+    </div>`;
+  $('npCancel').onclick = () => $('modalRoot').innerHTML = '';
+  $('npSave').onclick = async () => {
+    const body = {
+      mrn: $('np_mrn').value.trim(), name: $('np_name').value.trim(),
+      dob: $('np_dob').value, gender: $('np_gender').value,
+      address: $('np_address').value.trim(), phone: $('np_phone').value.trim(), email: $('np_email').value.trim()
+    };
+    if (!body.mrn || !body.name) { toast('MRN and Name are required'); return; }
+    const res = await fetch('/api/patients', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    if (!res.ok) { const e = await res.json().catch(()=>({})); toast(e.error || 'Create failed'); return; }
+    const { id } = await res.json();
+    $('modalRoot').innerHTML = '';
+    toast('Patient created.');
+    await loadPatients();
+    await selectPatient(id);
+  };
+};
+
+loadPatients();
+</script>
+</body>
+</html>
