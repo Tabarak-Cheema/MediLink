@@ -1,20 +1,28 @@
 // MediLink - FHIR R4 Clinical Record Viewer backend
-// Express + better-sqlite3. Auto-creates and seeds ./medilink.db on first run.
+// Express + Node's built-in node:sqlite. Auto-creates and seeds ./medilink.db on first run.
 
 const express = require('express');
-const Database = require('better-sqlite3');
 const path = require('path');
-const http = require('http');
 const https = require('https');
+
+// node:sqlite is built into Node 22.5+ and stable in Node 23+.
+// On Node 22.5-22.x it needs --experimental-sqlite; on Node 23+/24 it does not.
+let DatabaseSync;
+try {
+  ({ DatabaseSync } = require('node:sqlite'));
+} catch (err) {
+  console.error('\nnode:sqlite is unavailable. Please use Node 22.5+ (with --experimental-sqlite on 22.x) or Node 23+.\n');
+  throw err;
+}
 
 const app = express();
 const PORT = 3000;
 const DB_PATH = path.join(__dirname, 'medilink.db');
 
 // ---------- Database setup ----------
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const db = new DatabaseSync(DB_PATH);
+db.exec('PRAGMA journal_mode = WAL;');
+db.exec('PRAGMA foreign_keys = ON;');
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS patients (
@@ -113,10 +121,11 @@ function seedIfEmpty() {
     'INSERT INTO encounters (patient_id, date, encounter_type, provider, reason, notes) VALUES (?, ?, ?, ?, ?, ?)'
   );
 
-  const tx = db.transaction(() => {
+  db.exec('BEGIN');
+  try {
     // --- Patient 1: Sarah Ahmed ---
-    const p1 = insertPatient.run('MLK-10294', 'Sarah Ahmed', 'female', '1978-04-12',
-      'House 12, Street 4, DHA Phase 6, Karachi', '+92-300-1234567', 'sarah.ahmed@example.pk').lastInsertRowid;
+    const p1 = Number(insertPatient.run('MLK-10294', 'Sarah Ahmed', 'female', '1978-04-12',
+      'House 12, Street 4, DHA Phase 6, Karachi', '+92-300-1234567', 'sarah.ahmed@example.pk').lastInsertRowid);
     insertCondition.run(p1, 'Type 2 Diabetes Mellitus', 'active', '2019-06-15', 'E11.9', 'moderate');
     insertCondition.run(p1, 'Essential Hypertension', 'active', '2020-02-10', 'I10', 'moderate');
     insertCondition.run(p1, 'Hyperlipidemia', 'active', '2021-11-05', 'E78.5', 'mild');
@@ -125,7 +134,6 @@ function seedIfEmpty() {
     insertMed.run(p1, 'Atorvastatin', '20 mg', 'nightly', 'oral', 'active', '2021-11-10', 'Dr. Imran Qadir');
     insertAllergy.run(p1, 'Penicillin', 'high', 'Anaphylaxis', 'active');
     insertAllergy.run(p1, 'Shellfish', 'moderate', 'Hives, swelling', 'active');
-    // BP readings trending 138/88 -> 145/92 over 6 months
     const bp1 = [[138,88],[139,88],[140,89],[141,90],[142,90],[142,91],[143,91],[144,91],[144,92],[145,92]];
     const hr1 = [72,74,76,78,80,78,82,80,83,84];
     const bpDates1 = ['2026-05-12','2026-05-28','2026-06-15','2026-07-02','2026-07-20','2026-08-05','2026-08-22','2026-09-10','2026-10-02','2026-10-25'];
@@ -148,8 +156,8 @@ function seedIfEmpty() {
     enc1.forEach(e => insertEnc.run(p1, ...e));
 
     // --- Patient 2: Daniyal Khan ---
-    const p2 = insertPatient.run('MLK-10587', 'Daniyal Khan', 'male', '1992-09-30',
-      'Flat 7, Gulberg III, Lahore', '+92-321-7654321', 'daniyal.khan@example.pk').lastInsertRowid;
+    const p2 = Number(insertPatient.run('MLK-10587', 'Daniyal Khan', 'male', '1992-09-30',
+      'Flat 7, Gulberg III, Lahore', '+92-321-7654321', 'daniyal.khan@example.pk').lastInsertRowid);
     insertCondition.run(p2, 'Asthma', 'active', '2015-04-10', 'J45.909', 'moderate');
     insertCondition.run(p2, 'Seasonal Allergic Rhinitis', 'active', '2016-03-20', 'J30.2', 'mild');
     insertMed.run(p2, 'Albuterol Inhaler', '90 mcg/puff', 'PRN', 'inhalation', 'active', '2015-04-15', 'Dr. Hassan Ali');
@@ -174,8 +182,8 @@ function seedIfEmpty() {
     enc2.forEach(e => insertEnc.run(p2, ...e));
 
     // --- Patient 3: Ayesha Malik ---
-    const p3 = insertPatient.run('MLK-10891', 'Ayesha Malik', 'female', '1965-11-22',
-      'House 44, F-7/2, Islamabad', '+92-333-9988776', 'ayesha.malik@example.pk').lastInsertRowid;
+    const p3 = Number(insertPatient.run('MLK-10891', 'Ayesha Malik', 'female', '1965-11-22',
+      'House 44, F-7/2, Islamabad', '+92-333-9988776', 'ayesha.malik@example.pk').lastInsertRowid);
     insertCondition.run(p3, 'Congestive Heart Failure', 'active', '2022-05-18', 'I50.9', 'severe');
     insertCondition.run(p3, 'Atrial Fibrillation', 'active', '2022-05-20', 'I48.91', 'moderate');
     insertCondition.run(p3, 'Chronic Kidney Disease Stage 3', 'active', '2023-01-10', 'N18.3', 'moderate');
@@ -209,9 +217,12 @@ function seedIfEmpty() {
       ['2026-11-02','Office Visit','Dr. Nadia Siddiqui','Chronic care visit','Overall stable this month']
     ];
     enc3.forEach(e => insertEnc.run(p3, ...e));
-  });
-  tx();
-  console.log('Seeded database with 3 demo patients.');
+    db.exec('COMMIT');
+    console.log('Seeded database with 3 demo patients.');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
 }
 seedIfEmpty();
 
@@ -226,14 +237,15 @@ app.use((req, res, next) => {
 });
 
 // Audit logging
+const insertAudit = db.prepare(
+  'INSERT INTO audit_log (timestamp, method, path, status, duration_ms) VALUES (?, ?, ?, ?, ?)'
+);
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
     if (req.path.startsWith('/api/')) {
       try {
-        db.prepare(
-          'INSERT INTO audit_log (timestamp, method, path, status, duration_ms) VALUES (?, ?, ?, ?, ?)'
-        ).run(new Date().toISOString(), req.method, req.path, res.statusCode, Date.now() - start);
+        insertAudit.run(new Date().toISOString(), req.method, req.path, res.statusCode, Date.now() - start);
       } catch (e) { /* non-fatal */ }
     }
   });
@@ -280,31 +292,32 @@ app.get('/api/patients', (req, res) => {
 });
 
 app.get('/api/patients/:id', (req, res) => {
-  const detail = buildPatientDetail(req.params.id);
+  const detail = buildPatientDetail(Number(req.params.id));
   if (!detail) return res.status(404).json({ error: 'Patient not found' });
   detail.patient.age = ageFromDob(detail.patient.dob);
   res.json(detail);
 });
 
 app.get('/api/patients/:id/conditions', (req, res) => {
-  res.json(db.prepare('SELECT * FROM conditions WHERE patient_id = ?').all(req.params.id));
+  res.json(db.prepare('SELECT * FROM conditions WHERE patient_id = ?').all(Number(req.params.id)));
 });
 app.get('/api/patients/:id/medications', (req, res) => {
-  res.json(db.prepare('SELECT * FROM medications WHERE patient_id = ?').all(req.params.id));
+  res.json(db.prepare('SELECT * FROM medications WHERE patient_id = ?').all(Number(req.params.id)));
 });
 app.get('/api/patients/:id/allergies', (req, res) => {
-  res.json(db.prepare('SELECT * FROM allergies WHERE patient_id = ?').all(req.params.id));
+  res.json(db.prepare('SELECT * FROM allergies WHERE patient_id = ?').all(Number(req.params.id)));
 });
 app.get('/api/patients/:id/observations', (req, res) => {
   const { type } = req.query;
+  const pid = Number(req.params.id);
   if (type) {
-    res.json(db.prepare('SELECT * FROM observations WHERE patient_id = ? AND type = ? ORDER BY effective_date ASC').all(req.params.id, type));
+    res.json(db.prepare('SELECT * FROM observations WHERE patient_id = ? AND type = ? ORDER BY effective_date ASC').all(pid, type));
   } else {
-    res.json(db.prepare('SELECT * FROM observations WHERE patient_id = ? ORDER BY effective_date ASC').all(req.params.id));
+    res.json(db.prepare('SELECT * FROM observations WHERE patient_id = ? ORDER BY effective_date ASC').all(pid));
   }
 });
 app.get('/api/patients/:id/encounters', (req, res) => {
-  res.json(db.prepare('SELECT * FROM encounters WHERE patient_id = ? ORDER BY date DESC').all(req.params.id));
+  res.json(db.prepare('SELECT * FROM encounters WHERE patient_id = ?').all(Number(req.params.id)));
 });
 
 app.post('/api/patients/:id/encounters', (req, res) => {
@@ -313,8 +326,8 @@ app.post('/api/patients/:id/encounters', (req, res) => {
   try {
     const info = db.prepare(
       'INSERT INTO encounters (patient_id, date, encounter_type, provider, reason, notes) VALUES (?, ?, ?, ?, ?, ?)'
-    ).run(req.params.id, date, type, provider || '', reason || '', notes || '');
-    res.status(201).json({ id: info.lastInsertRowid });
+    ).run(Number(req.params.id), date, type, provider || '', reason || '', notes || '');
+    res.status(201).json({ id: Number(info.lastInsertRowid) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
